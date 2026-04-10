@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Reflexy</title>
+    <style>
+        body { margin: 0; background: #050505; color: #00ffcc; font-family: 'Courier New', monospace; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        canvas { border: 2px solid #00ffcc; box-shadow: 0 0 20px #00ffcc; background: #000; cursor: none; display: none; }
+        #menu-inicial { text-align: center; background: rgba(0,0,0,0.9); padding: 25px; border: 2px solid #00ffcc; z-index: 20; width: 450px; }
+        .btn { background: transparent; border: 1px solid #00ffcc; color: #00ffcc; padding: 10px; cursor: pointer; font-family: 'Courier New'; margin: 5px; width: 90%; transition: 0.3s; }
+        .btn:hover:not(:disabled) { background: #00ffcc; color: #000; }
+        .money-tag { color: #ffd700; font-size: 1.4em; margin-bottom: 15px; }
+        .skin-grid { display: flex; justify-content: space-around; margin-top: 15px; }
+        .skin-item { border: 1px solid #444; padding: 5px; width: 30%; cursor: pointer; font-size: 0.8em; }
+        .selected { border: 2px solid #ffd700 !important; color: #ffd700 !important; }
+        #ui { position: absolute; top: 20px; left: 20px; pointer-events: none; display: none; }
+    </style>
+</head>
+<body>
+<meta name="description" content="Reflexy - Um jogo de reflexos neon frenético. Desvie, ganhe moedas e compre skins!">
+<meta name="keywords" content="Reflexy, Jogo, Neon, Arcade, Browser Game">
+<meta name="author" content="Seu Nome">
+
+    <div id="menu-inicial">
+        <h1 style="text-shadow: 0 0 15px #00ffcc;">REFLEXY</h1>
+        <div class="money-tag">BANCO: $<span id="banco-val">0</span></div>
+        
+        <button class="btn" onclick="iniciar(2.5, 2)">JOGAR (NORMAL)</button>
+        <button class="btn" style="border-color:#ff0055; color:#ff0055;" onclick="iniciar(5, 5)">JOGAR (ULTRA)</button>
+
+        <p style="margin-top:20px;">--- SKINS ---</p>
+        <div class="skin-grid">
+            <div id="skin-0" class="skin-item selected" onclick="comprarOuSelecionarSkin(0, 0)">GOLD</div>
+            <div id="skin-1" class="skin-item" onclick="comprarOuSelecionarSkin(1, 2000)">GHOST</div>
+            <div id="skin-2" class="skin-item" onclick="comprarOuSelecionarSkin(2, 5000)">PULSE</div>
+        </div>
+
+        <button class="btn" id="buy-shield" style="margin-top:20px;" onclick="comprarUpgrade('shield', 500)">ESCUDO INICIAL ($500)</button>
+    </div>
+
+    <div id="ui">
+        <p>SCORE: <span id="score">0</span> | COINS: $<span id="coins">0</span></p>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    // --- MOTOR DE ÁUDIO (Web Audio API) ---
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    function playSound(freq, type, duration, vol) {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    }
+
+    const sfx = {
+        spawn: () => playSound(150, 'sine', 0.1, 0.1),
+        coin: () => playSound(800, 'sine', 0.2, 0.1),
+        hit: () => playSound(60, 'sawtooth', 0.4, 0.2),
+        select: () => playSound(400, 'square', 0.05, 0.05)
+    };
+
+    // --- LÓGICA DO JOGO ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 800; canvas.height = 600;
+
+    let banco = parseInt(localStorage.getItem('reflexy_banco')) || 0;
+    let upShield = localStorage.getItem('reflexy_shield') === 'true';
+    let skinsOwned = JSON.parse(localStorage.getItem('reflexy_skins')) || [true, false, false];
+    let skinEquipada = parseInt(localStorage.getItem('reflexy_equipada')) || 0;
+
+    function atualizarMenu() {
+        document.getElementById('banco-val').innerText = banco;
+        document.getElementById('buy-shield').disabled = upShield;
+        if(upShield) document.getElementById('buy-shield').innerText = "ESCUDO ADQUIRIDO";
+        for(let i=0; i<3; i++) {
+            const el = document.getElementById('skin-'+i);
+            el.classList.toggle('selected', i === skinEquipada);
+        }
+    }
+    atualizarMenu();
+
+    function comprarOuSelecionarSkin(id, preco) {
+        sfx.select();
+        if(skinsOwned[id]) {
+            skinEquipada = id;
+        } else if(banco >= preco) {
+            banco -= preco;
+            skinsOwned[id] = true;
+            skinEquipada = id;
+            sfx.coin();
+            saveAll();
+        }
+        localStorage.setItem('reflexy_equipada', skinEquipada);
+        atualizarMenu();
+    }
+
+    function comprarUpgrade(tipo, preco) {
+        if (banco >= preco && !upShield) {
+            sfx.coin();
+            banco -= preco;
+            upShield = true;
+            saveAll();
+            atualizarMenu();
+        }
+    }
+
+    function saveAll() {
+        localStorage.setItem('reflexy_banco', banco);
+        localStorage.setItem('reflexy_shield', upShield);
+        localStorage.setItem('reflexy_skins', JSON.stringify(skinsOwned));
+    }
+
+    let score = 0, coins = 0, playing = false, enemies = [], eSpeed = 2, mult = 1, frameCount = 0;
+    let player = { x: 400, y: 300, size: 10, color: '#FFD700', shield: false };
+
+    window.addEventListener('mousemove', (e) => {
+        if (!playing) return;
+        const rect = canvas.getBoundingClientRect();
+        player.x = e.clientX - rect.left;
+        player.y = e.clientY - rect.top;
+    });
+
+    function iniciar(vel, m) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        sfx.select();
+        document.getElementById('menu-inicial').style.display = 'none';
+        canvas.style.display = 'block';
+        document.getElementById('ui').style.display = 'block';
+        playing = true; eSpeed = vel; mult = m;
+        if(upShield) { player.shield = true; player.color = "#fff"; }
+        gameLoop();
+    }
+
+    setInterval(() => { if(playing) { coins += mult; document.getElementById('coins').innerText = coins; } }, 1000);
+
+    function gameLoop() {
+        if (!playing) return;
+        frameCount++;
+        ctx.fillStyle = (skinEquipada === 1) ? 'rgba(0, 0, 0, 0.05)' : 'rgba(0, 0, 0, 0.2)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        score++;
+        document.getElementById('score').innerText = score;
+
+        if (Math.random() < 0.05) {
+            sfx.spawn();
+            const side = Math.floor(Math.random() * 4);
+            let x, y;
+            if (side === 0) { x = Math.random() * canvas.width; y = -20; }
+            else { x = -20; y = Math.random() * canvas.height; }
+            const angle = Math.atan2(player.y - y, player.x - x);
+            enemies.push({ x, y, vx: Math.cos(angle) * eSpeed, vy: Math.sin(angle) * eSpeed });
+        }
+
+        enemies.forEach((en, i) => {
+            en.x += en.vx; en.y += en.vy;
+            ctx.fillStyle = '#ff0055';
+            ctx.fillRect(en.x, en.y, 15, 15);
+            if (Math.hypot(player.x - en.x, player.y - en.y) < player.size + 10) {
+                sfx.hit();
+                if(player.shield) { player.shield = false; player.color = '#FFD700'; enemies.splice(i, 1); }
+                else { finalizar(); }
+            }
+        });
+
+        let pColor = skinEquipada === 2 ? `hsl(${frameCount % 360}, 100%, 50%)` : (skinEquipada === 1 ? '#00ffcc' : '#FFD700');
+        if(player.shield) pColor = "#fff";
+        ctx.fillStyle = pColor;
+        ctx.shadowBlur = 15; ctx.shadowColor = pColor;
+        ctx.beginPath(); ctx.arc(player.x, player.y, player.size, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0;
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    function finalizar() {
+        playing = false;
+        banco += coins;
+        saveAll();
+        alert("REFLEXY OVER! Saldo: " + coins);
+        location.reload();
+   
+}
+</script>
+</body>
+</html>
